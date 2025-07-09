@@ -76,6 +76,15 @@ typedef struct ShortTermRPS {
     int32_t delta_poc[32];
     uint32_t used;
 
+    /* Raw bitstream values, indexed by source candidate position j (predict
+     * case) or by negative-then-positive position (non-predict case). Used to
+     * fill hardware acceleration controls that expect the un-reordered values
+     * from the bitstream. */
+    uint16_t delta_poc_s0_minus1[16];
+    uint16_t delta_poc_s1_minus1[16];
+    uint32_t used_by_curr_pic_flag;
+    uint32_t use_delta_flag;
+
     uint8_t delta_idx;
     uint8_t num_negative_pics;
     uint8_t num_delta_pocs;
@@ -85,7 +94,6 @@ typedef struct ShortTermRPS {
     unsigned delta_rps_sign:1;
 
     unsigned rps_predict:1;
-    unsigned use_delta:1;
 } ShortTermRPS;
 
 typedef struct HEVCWindow {

@@ -118,8 +118,15 @@ int ff_hevc_decode_short_term_rps(GetBitContext *gb, AVCodecContext *avctx,
     int k  = 0;
     int i;
 
-    rps->used        = 0;
-    rps->rps_predict = 0;
+    rps->used                  = 0;
+    rps->used_by_curr_pic_flag = 0;
+    rps->use_delta_flag        = 0;
+    rps->rps_predict           = 0;
+    /* delta_idx_minus1 is inferred to 0 when not present (SPS path),
+     * so default delta_idx (= delta_idx_minus1 + 1) to 1. */
+    rps->delta_idx             = 1;
+    memset(rps->delta_poc_s0_minus1, 0, sizeof(rps->delta_poc_s0_minus1));
+    memset(rps->delta_poc_s1_minus1, 0, sizeof(rps->delta_poc_s1_minus1));
 
     if (rps != sps->st_rps && sps->nb_st_rps)
         rps->rps_predict = get_bits1(gb);
@@ -127,7 +134,13 @@ int ff_hevc_decode_short_term_rps(GetBitContext *gb, AVCodecContext *avctx,
     if (rps->rps_predict) {
         const ShortTermRPS *rps_ridx;
         uint8_t used[32] = { 0 };
+        uint8_t used_by_curr_pic_flag[32] = { 0 };
+        uint8_t use_delta_flag[32];
         int delta_rps;
+
+        /* use_delta_flag[j] is inferred to be 1 when not present */
+        for (i = 0; i < FF_ARRAY_ELEMS(use_delta_flag); i++)
+            use_delta_flag[i] = 1;
 
         if (is_slice_header) {
             rps->delta_idx = get_ue_golomb_long(gb) + 1;
@@ -152,18 +165,19 @@ int ff_hevc_decode_short_term_rps(GetBitContext *gb, AVCodecContext *avctx,
         }
         delta_rps      = (1 - (rps->delta_rps_sign << 1)) * rps->abs_delta_rps;
         for (i = 0; i <= rps_ridx->num_delta_pocs; i++) {
-            used[k] = get_bits1(gb);
+            int u = get_bits1(gb);
+            used_by_curr_pic_flag[i] = u;
 
-            rps->use_delta = 0;
-            if (!used[k])
-                rps->use_delta = get_bits1(gb);
+            if (!u)
+                use_delta_flag[i] = get_bits1(gb);
 
-            if (used[k] || rps->use_delta) {
+            if (u || use_delta_flag[i]) {
                 if (i < rps_ridx->num_delta_pocs)
                     delta_poc = delta_rps + rps_ridx->delta_poc[i];
                 else
                     delta_poc = delta_rps;
                 rps->delta_poc[k] = delta_poc;
+                used[k] = u;
                 if (delta_poc < 0)
                     k0++;
                 k++;
@@ -212,6 +226,11 @@ int ff_hevc_decode_short_term_rps(GetBitContext *gb, AVCodecContext *avctx,
 
         for (unsigned i = 0; i < FF_ARRAY_ELEMS(used); i++)
             rps->used |= (uint32_t)used[i] << i;
+        /* Raw bitstream flags, indexed by source candidate position j */
+        for (unsigned i = 0; i < FF_ARRAY_ELEMS(used_by_curr_pic_flag); i++) {
+            rps->used_by_curr_pic_flag |= (uint32_t)used_by_curr_pic_flag[i] << i;
+            rps->use_delta_flag        |= (uint32_t)use_delta_flag[i] << i;
+        }
     } else {
         unsigned int nb_positive_pics;
 
@@ -227,6 +246,7 @@ int ff_hevc_decode_short_term_rps(GetBitContext *gb, AVCodecContext *avctx,
         rps->num_delta_pocs = rps->num_negative_pics + nb_positive_pics;
         if (rps->num_delta_pocs) {
             int prev = 0;
+            unsigned int u;
 
             for (i = 0; i < rps->num_negative_pics; i++) {
                 delta_poc = get_ue_golomb_long(gb) + 1;
@@ -238,7 +258,10 @@ int ff_hevc_decode_short_term_rps(GetBitContext *gb, AVCodecContext *avctx,
                 }
                 prev -= delta_poc;
                 rps->delta_poc[i] = prev;
-                rps->used        |= get_bits1(gb) * (1 << i);
+                rps->delta_poc_s0_minus1[i] = delta_poc - 1;
+                u = get_bits1(gb);
+                rps->used                  |= u << i;
+                rps->used_by_curr_pic_flag |= u << i;
             }
             prev = 0;
             for (i = 0; i < nb_positive_pics; i++) {
@@ -251,7 +274,10 @@ int ff_hevc_decode_short_term_rps(GetBitContext *gb, AVCodecContext *avctx,
                 }
                 prev += delta_poc;
                 rps->delta_poc[rps->num_negative_pics + i] = prev;
-                rps->used                                 |= get_bits1(gb) * (1 << (rps->num_negative_pics + i));
+                rps->delta_poc_s1_minus1[i] = delta_poc - 1;
+                u = get_bits1(gb);
+                rps->used                  |= u << (rps->num_negative_pics + i);
+                rps->used_by_curr_pic_flag |= u << (rps->num_negative_pics + i);
             }
         }
     }

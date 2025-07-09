@@ -25,7 +25,9 @@
 #include "internal.h"
 #include "v4l2_request.h"
 
-#define V4L2_HEVC_CONTROLS_MAX 6
+#define V4L2_HEVC_CONTROLS_MAX 8
+#define MAX_EXT_SPS_ST_RPS 64
+#define MAX_EXT_SPS_LT_RPS 32
 
 typedef struct V4L2RequestContextHEVC {
     V4L2RequestContext base;
@@ -34,6 +36,7 @@ typedef struct V4L2RequestContextHEVC {
     unsigned int max_slice_params;
     unsigned int max_entry_point_offsets;
     bool has_scaling_matrix;
+    bool has_ext_sps_rps;
 } V4L2RequestContextHEVC;
 
 typedef struct V4L2RequestControlsHEVC {
@@ -44,6 +47,8 @@ typedef struct V4L2RequestControlsHEVC {
     struct v4l2_ctrl_hevc_scaling_matrix scaling_matrix;
     struct v4l2_ctrl_hevc_slice_params slice_params;
     struct v4l2_ctrl_hevc_slice_params *frame_slice_params;
+    struct v4l2_ctrl_hevc_ext_sps_st_rps ext_sps_st_rps[MAX_EXT_SPS_ST_RPS];
+    struct v4l2_ctrl_hevc_ext_sps_lt_rps ext_sps_lt_rps[MAX_EXT_SPS_LT_RPS];
     unsigned int allocated_slice_params;
     unsigned int num_slice_params;
     uint32_t *entry_point_offsets;
@@ -361,6 +366,47 @@ static void fill_sps(struct v4l2_ctrl_hevc_sps *ctrl, const HEVCContext *h)
         ctrl->flags |= V4L2_HEVC_SPS_FLAG_STRONG_INTRA_SMOOTHING_ENABLED;
 }
 
+static void fill_ext_sps_st_rps(struct v4l2_ctrl_hevc_ext_sps_st_rps *ctrl,
+                                const HEVCContext *h)
+{
+    const HEVCSPS *sps = h->pps->sps;
+
+    for (int i = 0; i < sps->nb_st_rps; i++) {
+        const ShortTermRPS *st_rps = &sps->st_rps[i];
+
+        ctrl[i] = (struct v4l2_ctrl_hevc_ext_sps_st_rps) {
+            .delta_idx_minus1     = st_rps->delta_idx - 1,
+            .delta_rps_sign       = st_rps->delta_rps_sign,
+            .abs_delta_rps_minus1 = st_rps->abs_delta_rps - 1,
+            .num_negative_pics    = st_rps->num_negative_pics,
+            .num_positive_pics    = st_rps->num_delta_pocs - st_rps->num_negative_pics,
+            .used_by_curr_pic     = st_rps->used_by_curr_pic_flag,
+            .use_delta_flag       = st_rps->use_delta_flag,
+            .flags                = st_rps->rps_predict ?
+                                    V4L2_HEVC_EXT_SPS_ST_RPS_FLAG_INTER_REF_PIC_SET_PRED : 0,
+        };
+
+        for (int j = 0; j < 16; j++) {
+            ctrl[i].delta_poc_s0_minus1[j] = st_rps->delta_poc_s0_minus1[j];
+            ctrl[i].delta_poc_s1_minus1[j] = st_rps->delta_poc_s1_minus1[j];
+        }
+    }
+}
+
+static void fill_ext_sps_lt_rps(struct v4l2_ctrl_hevc_ext_sps_lt_rps *ctrl,
+                                const HEVCContext *h)
+{
+    const HEVCSPS *sps = h->pps->sps;
+
+    for (int i = 0; i < sps->num_long_term_ref_pics_sps; i++) {
+        ctrl[i] = (struct v4l2_ctrl_hevc_ext_sps_lt_rps) {
+            .lt_ref_pic_poc_lsb_sps = sps->lt_ref_pic_poc_lsb_sps[i],
+            .flags                  = (sps->used_by_curr_pic_lt & (1U << i)) ?
+                                      V4L2_HEVC_EXT_SPS_LT_RPS_FLAG_USED_LT : 0,
+        };
+    }
+}
+
 static int v4l2_request_hevc_start_frame(AVCodecContext *avctx,
                                          av_unused const AVBufferRef *buf_ref,
                                          av_unused const uint8_t *buffer,
@@ -379,6 +425,12 @@ static int v4l2_request_hevc_start_frame(AVCodecContext *avctx,
         return ret;
 
     fill_sps(&controls->sps, h);
+    if (ctx->has_ext_sps_rps) {
+        if (sps->nb_st_rps)
+            fill_ext_sps_st_rps(controls->ext_sps_st_rps, h);
+        if (sps->num_long_term_ref_pics_sps)
+            fill_ext_sps_lt_rps(controls->ext_sps_lt_rps, h);
+    }
     fill_decode_params(&controls->decode_params, h);
 
     if (ctx->has_scaling_matrix) {
@@ -529,6 +581,24 @@ static int v4l2_request_hevc_queue_decode(AVCodecContext *avctx, bool last_slice
         .size = sizeof(controls->decode_params),
     };
 
+    if (ctx->has_ext_sps_rps && controls->sps.num_short_term_ref_pic_sets) {
+        control[count++] = (struct v4l2_ext_control) {
+            .id = V4L2_CID_STATELESS_HEVC_EXT_SPS_ST_RPS,
+            .ptr = controls->ext_sps_st_rps,
+            .size = sizeof(*controls->ext_sps_st_rps) *
+                    controls->sps.num_short_term_ref_pic_sets,
+        };
+    }
+
+    if (ctx->has_ext_sps_rps && controls->sps.num_long_term_ref_pics_sps) {
+        control[count++] = (struct v4l2_ext_control) {
+            .id = V4L2_CID_STATELESS_HEVC_EXT_SPS_LT_RPS,
+            .ptr = controls->ext_sps_lt_rps,
+            .size = sizeof(*controls->ext_sps_lt_rps) *
+                    controls->sps.num_long_term_ref_pics_sps,
+        };
+    }
+
     if (ctx->has_scaling_matrix) {
         control[count++] = (struct v4l2_ext_control) {
             .id = V4L2_CID_STATELESS_HEVC_SCALING_MATRIX,
@@ -652,6 +722,12 @@ static int v4l2_request_hevc_post_frames_ctx(AVCodecContext *avctx)
     struct v4l2_query_ext_ctrl slice_params = {
         .id = V4L2_CID_STATELESS_HEVC_SLICE_PARAMS,
     };
+    struct v4l2_query_ext_ctrl ext_sps_st_rps = {
+        .id = V4L2_CID_STATELESS_HEVC_EXT_SPS_ST_RPS,
+    };
+    struct v4l2_query_ext_ctrl ext_sps_lt_rps = {
+        .id = V4L2_CID_STATELESS_HEVC_EXT_SPS_LT_RPS,
+    };
 
     ctx->decode_mode = ff_v4l2_request_query_control_default_value(avctx,
                                         V4L2_CID_STATELESS_HEVC_DECODE_MODE);
@@ -692,10 +768,17 @@ static int v4l2_request_hevc_post_frames_ctx(AVCodecContext *avctx)
     else
         ctx->max_slice_params = 0;
 
+    /* The EXT SPS ST/LT RPS controls were added together; both must be
+     * present (linux 6.20+) to enable the path. */
+    ctx->has_ext_sps_rps =
+        !ff_v4l2_request_query_control(avctx, &ext_sps_st_rps) &&
+        !ff_v4l2_request_query_control(avctx, &ext_sps_lt_rps);
+
     av_log(ctx, AV_LOG_VERBOSE, "%s-based decoder with SLICE_PARAMS=%u, "
-           "ENTRY_POINT_OFFSETS=%u and SCALING_MATRIX=%d controls\n",
+           "ENTRY_POINT_OFFSETS=%u, SCALING_MATRIX=%d and EXT_SPS_RPS=%d controls\n",
           ctx->decode_mode == V4L2_STATELESS_HEVC_DECODE_MODE_SLICE_BASED ? "slice" : "frame",
-          ctx->max_slice_params, ctx->max_entry_point_offsets, ctx->has_scaling_matrix);
+          ctx->max_slice_params, ctx->max_entry_point_offsets,
+          ctx->has_scaling_matrix, ctx->has_ext_sps_rps);
 
     control[0].value = ctx->decode_mode;
     control[1].value = ctx->start_code;
