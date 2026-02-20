@@ -621,11 +621,15 @@ static int deint_v4l2m2m_enqueue(V4L2Queue *queue, const AVFrame* frame)
     if (!buf)
         return AVERROR(ENOMEM);
 
-    if (V4L2_TYPE_IS_MULTIPLANAR(buf->buffer.type))
-        for (i = 0; i < drm_desc->nb_objects; i++)
+    if (V4L2_TYPE_IS_MULTIPLANAR(buf->buffer.type)) {
+        for (i = 0; i < drm_desc->nb_objects; i++) {
             buf->buffer.m.planes[i].m.fd = drm_desc->objects[i].fd;
-    else
+            buf->buffer.m.planes[i].bytesused = buf->plane_info[i].length;
+        }
+    } else {
         buf->buffer.m.fd = drm_desc->objects[0].fd;
+        buf->buffer.bytesused = buf->plane_info[0].length;
+    }
 
     return deint_v4l2m2m_enqueue_buffer(buf);
 }
