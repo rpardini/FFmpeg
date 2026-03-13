@@ -885,6 +885,9 @@ static int deint_v4l2m2m_filter_frame(AVFilterLink *link, AVFrame *in)
     av_log(priv, AV_LOG_DEBUG, "input pts: %"PRId64" field :%d interlaced: %d\n",
           in->pts, !!(in->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST), !!(in->flags & AV_FRAME_FLAG_INTERLACED));
 
+    if (ctx->cur_in_frame)
+        av_frame_free(&ctx->cur_in_frame);
+
     ctx->cur_in_frame = in;
 
     if (ctx->field_order == V4L2_FIELD_ANY) {
