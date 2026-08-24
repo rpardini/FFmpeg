@@ -892,10 +892,41 @@ static int deint_v4l2m2m_filter_frame(AVFilterLink *link, AVFrame *in)
 
     if (ctx->field_order == V4L2_FIELD_ANY) {
         AVDRMFrameDescriptor *drm_desc = (AVDRMFrameDescriptor *)in->data[0];
-        ctx->orig_width = drm_desc->layers[0].planes[0].pitch;
-        ctx->orig_height = drm_desc->layers[0].planes[1].offset / ctx->orig_width;
-        ctx->drm_in_format = drm_desc->layers->format;
-        ctx->drm_out_format = drm_desc->layers->format;
+        AVDRMLayerDescriptor *layer = &drm_desc->layers[0];
+        uint64_t modifier = drm_desc->objects[0].format_modifier;
+
+        /*
+         * Only a linear layout is understood, the DRM format is mapped to a
+         * V4L2 pixel format without carrying the modifier along. A tiled or
+         * compressed frame would be handed to the m2m device as if it were
+         * linear, so reject it instead of producing garbage.
+         */
+        if (modifier != DRM_FORMAT_MOD_LINEAR &&
+            modifier != DRM_FORMAT_MOD_INVALID) {
+            av_log(priv, AV_LOG_ERROR,
+                   "Unsupported frame layout, modifier 0x%016" PRIx64 " is not linear\n",
+                   modifier);
+            return AVERROR(ENOSYS);
+        }
+
+        /*
+         * The frame geometry is recovered from the plane layout, which assumes
+         * two planes stored back to back in a single memory plane. Formats
+         * using a separate memory plane per color plane, e.g. MediaTek MM21,
+         * would report a chroma offset of zero and a height of zero.
+         */
+        if (layer->nb_planes < 2 || !layer->planes[0].pitch ||
+            layer->planes[1].object_index != layer->planes[0].object_index ||
+            layer->planes[1].offset < layer->planes[0].pitch) {
+            av_log(priv, AV_LOG_ERROR,
+                   "Unsupported frame layout, expected two planes in a single object\n");
+            return AVERROR(ENOSYS);
+        }
+
+        ctx->orig_width = layer->planes[0].pitch;
+        ctx->orig_height = layer->planes[1].offset / ctx->orig_width;
+        ctx->drm_in_format = layer->format;
+        ctx->drm_out_format = layer->format;
 
 	if (!!(in->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST))
             ctx->field_order = V4L2_FIELD_INTERLACED_TB;
