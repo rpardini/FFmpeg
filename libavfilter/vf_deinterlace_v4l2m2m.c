@@ -920,6 +920,22 @@ static int deint_v4l2m2m_filter_frame(AVFilterLink *link, AVFrame *in)
 
     if (ctx->field_order == V4L2_FIELD_ANY) {
         AVDRMFrameDescriptor *drm_desc = (AVDRMFrameDescriptor *)in->data[0];
+        uint64_t modifier = drm_desc->objects[0].format_modifier;
+
+        /*
+         * The DRM format is mapped to a V4L2 pixel format without the
+         * modifier, so only linear layouts are understood. A tiled or
+         * compressed frame (MediaTek MM21, Allwinner tiled, Broadcom SAND,
+         * Arm AFBC) would be handed to the m2m device as if it were linear.
+         */
+        if (modifier != DRM_FORMAT_MOD_LINEAR &&
+            modifier != DRM_FORMAT_MOD_INVALID) {
+            av_log(priv, AV_LOG_ERROR,
+                   "Unsupported frame layout, modifier 0x%016" PRIx64 " is not linear\n",
+                   modifier);
+            return AVERROR(ENOSYS);
+        }
+
         ctx->in_objects = drm_desc->nb_objects;
         ctx->orig_width = drm_desc->layers[0].planes[0].pitch;
         if (ctx->in_objects == 2)
