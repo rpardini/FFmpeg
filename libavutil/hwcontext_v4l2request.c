@@ -35,6 +35,23 @@
 #include "mem.h"
 
 /*
+ * MediaTek modifiers, from the kernel's drm_fourcc.h; older libdrm copies
+ * (2.4.124 in Debian trixie) lack them, which would compile MM21 out.
+ */
+#ifndef DRM_FORMAT_MOD_VENDOR_MTK
+#define DRM_FORMAT_MOD_VENDOR_MTK 0x0b
+#endif
+#ifndef DRM_FORMAT_MOD_MTK
+#define DRM_FORMAT_MOD_MTK(__flags) fourcc_mod_code(MTK, __flags)
+#define MTK_FMT_MOD_TILE_16L32S 0x1
+#define MTK_FMT_MOD_10BIT_LAYOUT_LSBTILED (0x1 << 16)
+#define MTK_FMT_MOD_10BIT_LAYOUT_LSBRASTER (0x2 << 16)
+#endif
+#ifndef DRM_FORMAT_MOD_MTK_16L_32S_TILE
+#define DRM_FORMAT_MOD_MTK_16L_32S_TILE DRM_FORMAT_MOD_MTK(MTK_FMT_MOD_TILE_16L32S)
+#endif
+
+/*
  * Amlogic vdec zero-copy capture format: a single plane carrying the
  * decoder's native AFBC/MMU compression header ("scatter" layout), scanned
  * out directly by the G12 VD1 video overlay. Private to the meson vdec
@@ -195,6 +212,31 @@ static const struct {
     { V4L2_PIX_FMT_NV12_10_COL128, AV_PIX_FMT_YUV420P10, DRM_FORMAT_P030, DRM_FORMAT_MOD_BROADCOM_SAND128, 10 },
 #endif
 #endif
+#if defined(V4L2_PIX_FMT_MM21) && defined(DRM_FORMAT_MOD_MTK_16L_32S_TILE)
+    { V4L2_PIX_FMT_MM21, AV_PIX_FMT_YUV420P, DRM_FORMAT_NV12, DRM_FORMAT_MOD_MTK_16L_32S_TILE, 8 },
+#endif
+#if defined(V4L2_PIX_FMT_MT2110T) && defined(DRM_FORMAT_NV15) && \
+    defined(MTK_FMT_MOD_TILE_16L32S) && defined(MTK_FMT_MOD_10BIT_LAYOUT_LSBTILED)
+    {
+        .pixelformat = V4L2_PIX_FMT_MT2110T,
+        .sw_format = AV_PIX_FMT_YUV420P10,
+        .drm_format = DRM_FORMAT_NV15,
+        .format_modifier = DRM_FORMAT_MOD_MTK(MTK_FMT_MOD_TILE_16L32S |
+                                              MTK_FMT_MOD_10BIT_LAYOUT_LSBTILED),
+        .bit_depth = 10,
+    },
+#endif
+#if defined(V4L2_PIX_FMT_MT2110R) && defined(DRM_FORMAT_NV15) && \
+    defined(MTK_FMT_MOD_TILE_16L32S) && defined(MTK_FMT_MOD_10BIT_LAYOUT_LSBRASTER)
+    {
+        .pixelformat = V4L2_PIX_FMT_MT2110R,
+        .sw_format = AV_PIX_FMT_YUV420P10,
+        .drm_format = DRM_FORMAT_NV15,
+        .format_modifier = DRM_FORMAT_MOD_MTK(MTK_FMT_MOD_TILE_16L32S |
+                                              MTK_FMT_MOD_10BIT_LAYOUT_LSBRASTER),
+        .bit_depth = 10,
+    },
+#endif
 };
 
 /*
@@ -322,6 +364,25 @@ static int v4l2request_set_drm_descriptor(AVDRMFrameDescriptor *desc,
         if (pixelformat == V4L2_PIX_FMT_NV12_10_COL128)
             layer->planes[0].pitch *= 2;
         layer->planes[1].pitch = layer->planes[0].pitch;
+    }
+#endif
+
+#if defined(V4L2_PIX_FMT_MM21)
+    // MediaTek formats store the chroma plane in a separate memory plane
+    if (pixelformat == V4L2_PIX_FMT_MM21 && desc->nb_objects >= 2) {
+        layer->planes[1].object_index = 1;
+        layer->planes[1].offset = 0;
+        layer->planes[1].pitch = format->fmt.pix_mp.plane_fmt[1].bytesperline;
+    }
+#endif
+
+#if defined(V4L2_PIX_FMT_MT2110T) && defined(V4L2_PIX_FMT_MT2110R)
+    // MediaTek formats store the chroma plane in a separate memory plane
+    if ((pixelformat == V4L2_PIX_FMT_MT2110T ||
+         pixelformat == V4L2_PIX_FMT_MT2110R) && desc->nb_objects >= 2) {
+        layer->planes[1].object_index = 1;
+        layer->planes[1].offset = 0;
+        layer->planes[1].pitch = format->fmt.pix_mp.plane_fmt[1].bytesperline;
     }
 #endif
 
