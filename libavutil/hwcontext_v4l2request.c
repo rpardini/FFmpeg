@@ -113,6 +113,31 @@ static const struct {
     { V4L2_PIX_FMT_NV12_10_COL128, AV_PIX_FMT_YUV420P10, DRM_FORMAT_P030, DRM_FORMAT_MOD_BROADCOM_SAND128, 10 },
 #endif
 #endif
+#if defined(V4L2_PIX_FMT_MM21) && defined(DRM_FORMAT_MOD_MTK_16L_32S_TILE)
+    { V4L2_PIX_FMT_MM21, AV_PIX_FMT_YUV420P, DRM_FORMAT_NV12, DRM_FORMAT_MOD_MTK_16L_32S_TILE, 8 },
+#endif
+#if defined(V4L2_PIX_FMT_MT2110T) && defined(DRM_FORMAT_NV15) && \
+    defined(MTK_FMT_MOD_TILE_16L32S) && defined(MTK_FMT_MOD_10BIT_LAYOUT_LSBTILED)
+    {
+        .pixelformat = V4L2_PIX_FMT_MT2110T,
+        .sw_format = AV_PIX_FMT_YUV420P10,
+        .drm_format = DRM_FORMAT_NV15,
+        .format_modifier = DRM_FORMAT_MOD_MTK(MTK_FMT_MOD_TILE_16L32S |
+                                              MTK_FMT_MOD_10BIT_LAYOUT_LSBTILED),
+        .bit_depth = 10,
+    },
+#endif
+#if defined(V4L2_PIX_FMT_MT2110R) && defined(DRM_FORMAT_NV15) && \
+    defined(MTK_FMT_MOD_TILE_16L32S) && defined(MTK_FMT_MOD_10BIT_LAYOUT_LSBRASTER)
+    {
+        .pixelformat = V4L2_PIX_FMT_MT2110R,
+        .sw_format = AV_PIX_FMT_YUV420P10,
+        .drm_format = DRM_FORMAT_NV15,
+        .format_modifier = DRM_FORMAT_MOD_MTK(MTK_FMT_MOD_TILE_16L32S |
+                                              MTK_FMT_MOD_10BIT_LAYOUT_LSBRASTER),
+        .bit_depth = 10,
+    },
+#endif
 };
 
 static int v4l2request_set_drm_descriptor(AVDRMFrameDescriptor *desc,
@@ -191,6 +216,25 @@ static int v4l2request_set_drm_descriptor(AVDRMFrameDescriptor *desc,
         if (pixelformat == V4L2_PIX_FMT_NV12_10_COL128)
             layer->planes[0].pitch *= 2;
         layer->planes[1].pitch = layer->planes[0].pitch;
+    }
+#endif
+
+#if defined(V4L2_PIX_FMT_MM21)
+    // MediaTek formats store the chroma plane in a separate memory plane
+    if (pixelformat == V4L2_PIX_FMT_MM21 && desc->nb_objects >= 2) {
+        layer->planes[1].object_index = 1;
+        layer->planes[1].offset = 0;
+        layer->planes[1].pitch = format->fmt.pix_mp.plane_fmt[1].bytesperline;
+    }
+#endif
+
+#if defined(V4L2_PIX_FMT_MT2110T) && defined(V4L2_PIX_FMT_MT2110R)
+    // MediaTek formats store the chroma plane in a separate memory plane
+    if ((pixelformat == V4L2_PIX_FMT_MT2110T ||
+         pixelformat == V4L2_PIX_FMT_MT2110R) && desc->nb_objects >= 2) {
+        layer->planes[1].object_index = 1;
+        layer->planes[1].offset = 0;
+        layer->planes[1].pitch = format->fmt.pix_mp.plane_fmt[1].bytesperline;
     }
 #endif
 
