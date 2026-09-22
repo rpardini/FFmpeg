@@ -50,6 +50,7 @@ typedef struct V4L2RequestContext {
     uint32_t queued_output;
     uint32_t queued_request;
     uint64_t queued_capture;
+    uint64_t capture_error;
     struct v4l2_ext_control *init_controls;
     int nb_init_controls;
 } V4L2RequestContext;
