@@ -85,6 +85,7 @@ typedef struct DeintV4L2M2MContextShared {
     int height;
     int orig_width;
     int orig_height;
+    int in_objects;
     uint64_t drm_in_format;
     uint64_t drm_out_format;
 
@@ -269,11 +270,23 @@ static int deint_v4l2m2m_set_format(V4L2Queue *queue, uint32_t field, int width,
     uint32_t v4l2_pix_fmt = v4l2_pix_fmt_from_drm_format(drm_format);
 
     if (V4L2_TYPE_IS_MULTIPLANAR(fmt->type)) {
+        int planes = 1;
+
+        if (V4L2_TYPE_IS_OUTPUT(fmt->type) && ctx->in_objects == 2 &&
+            v4l2_pix_fmt == V4L2_PIX_FMT_NV12) {
+            v4l2_pix_fmt = V4L2_PIX_FMT_NV12M;
+            planes = 2;
+        }
+
         fmt->fmt.pix_mp.pixelformat = v4l2_pix_fmt;
         fmt->fmt.pix_mp.field = field;
         fmt->fmt.pix_mp.width = width;
         fmt->fmt.pix_mp.height = height;
-        /* TODO: bytesperline and imagesize */
+        fmt->fmt.pix_mp.num_planes = planes;
+        for (int i = 0; i < planes; i++) {
+            fmt->fmt.pix_mp.plane_fmt[i].bytesperline = width;
+            fmt->fmt.pix_mp.plane_fmt[i].sizeimage = 0;
+        }
     } else {
         fmt->fmt.pix.pixelformat = v4l2_pix_fmt;
         fmt->fmt.pix.field = field;
@@ -892,8 +905,12 @@ static int deint_v4l2m2m_filter_frame(AVFilterLink *link, AVFrame *in)
 
     if (ctx->field_order == V4L2_FIELD_ANY) {
         AVDRMFrameDescriptor *drm_desc = (AVDRMFrameDescriptor *)in->data[0];
+        ctx->in_objects = drm_desc->nb_objects;
         ctx->orig_width = drm_desc->layers[0].planes[0].pitch;
-        ctx->orig_height = drm_desc->layers[0].planes[1].offset / ctx->orig_width;
+        if (ctx->in_objects == 2)
+            ctx->orig_height = FFALIGN(ctx->height, 4);
+        else
+            ctx->orig_height = drm_desc->layers[0].planes[1].offset / ctx->orig_width;
         ctx->drm_in_format = drm_desc->layers->format;
         ctx->drm_out_format = drm_desc->layers->format;
 
