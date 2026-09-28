@@ -44,6 +44,15 @@
 #define V4L2_PIX_FMT_MESON_AM21C v4l2_fourcc('A', 'M', '2', '1')
 #endif
 
+/*
+ * Amlogic vdec basic-layout capture format: a single plane carrying the
+ * compressed body followed by its header, for SoCs where the decoder frame
+ * MMU is unavailable.
+ */
+#ifndef V4L2_PIX_FMT_MESON_AM21B
+#define V4L2_PIX_FMT_MESON_AM21B v4l2_fourcc('A', 'M', '2', 'B')
+#endif
+
 typedef struct V4L2RequestVideoDecoder {
     dev_t media_dev;
     dev_t video_dev;
@@ -139,6 +148,21 @@ static const struct {
         .format_modifier = DRM_FORMAT_MOD_AMLOGIC_FBC(AMLOGIC_FBC_LAYOUT_SCATTER, 0),
         .bit_depth = 10,
     },
+    {
+        .pixelformat = V4L2_PIX_FMT_MESON_AM21B,
+        .sw_format = AV_PIX_FMT_YUV420P,
+        .drm_format = DRM_FORMAT_YUV420_8BIT,
+        .format_modifier = DRM_FORMAT_MOD_AMLOGIC_FBC(AMLOGIC_FBC_LAYOUT_BASIC,
+                                                      AMLOGIC_FBC_OPTION_MEM_SAVING),
+        .bit_depth = 8,
+    },
+    {
+        .pixelformat = V4L2_PIX_FMT_MESON_AM21B,
+        .sw_format = AV_PIX_FMT_YUV420P10,
+        .drm_format = DRM_FORMAT_YUV420_10BIT,
+        .format_modifier = DRM_FORMAT_MOD_AMLOGIC_FBC(AMLOGIC_FBC_LAYOUT_BASIC, 0),
+        .bit_depth = 10,
+    },
 #if defined(V4L2_PIX_FMT_NV12_COL128) && defined(V4L2_PIX_FMT_NV12_10_COL128)
     { V4L2_PIX_FMT_NV12_COL128, AV_PIX_FMT_YUV420P, DRM_FORMAT_NV12, DRM_FORMAT_MOD_BROADCOM_SAND128, 8 },
 #if defined(DRM_FORMAT_P030)
@@ -224,6 +248,15 @@ static int v4l2request_set_drm_descriptor(AVDRMFrameDescriptor *desc,
      */
     if (pixelformat == V4L2_PIX_FMT_MESON_AM21C)
         layer->planes[0].pitch = 0;
+
+    /*
+     * In the basic layout the header follows the body, and the meson overlay
+     * locates it from the pitch, so the pitch must be the coded width.
+     */
+    if (pixelformat == V4L2_PIX_FMT_MESON_AM21B)
+        layer->planes[0].pitch = V4L2_TYPE_IS_MULTIPLANAR(format->type) ?
+                                 format->fmt.pix_mp.width :
+                                 format->fmt.pix.width;
 
 #if defined(V4L2_PIX_FMT_NV12M)
     // NV12M holds each plane in a separate buffer, not at an offset into one
