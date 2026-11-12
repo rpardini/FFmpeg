@@ -69,10 +69,18 @@ static void fill_weight_factors(struct v4l2_h264_weight_factors *weight_factors,
 }
 
 static void fill_dpb_entry(struct v4l2_h264_dpb_entry *entry,
+                           const H264Context *h,
                            const H264Picture *pic, int long_idx)
 {
     entry->reference_ts = ff_v4l2_request_get_capture_timestamp(pic->f);
-    entry->pic_num = pic->pic_id;
+    if (!pic->long_ref && !FIELD_PICTURE(h)) {
+        /* PicNum = FrameNumWrap (8.2.4.1); pic_id is only valid for pictures in the current ref lists */
+        int max_frame_num = 1 << h->ps.sps->log2_max_frame_num;
+        entry->pic_num = pic->frame_num > h->poc.frame_num ?
+                         pic->frame_num - max_frame_num : pic->frame_num;
+    } else {
+        entry->pic_num = pic->pic_id;
+    }
     entry->frame_num = pic->long_ref ? long_idx : pic->frame_num;
     entry->fields = pic->reference & V4L2_H264_FRAME_REF;
     entry->flags = V4L2_H264_DPB_ENTRY_FLAG_VALID;
@@ -96,7 +104,7 @@ static void fill_dpb(struct v4l2_ctrl_h264_decode_params *decode_params,
     for (int i = 0; i < h->short_ref_count; i++) {
         const H264Picture *pic = h->short_ref[i];
         if (pic && (pic->field_poc[0] != INT_MAX || pic->field_poc[1] != INT_MAX))
-            fill_dpb_entry(&decode_params->dpb[entries++], pic, pic->pic_id);
+            fill_dpb_entry(&decode_params->dpb[entries++], h, pic, pic->pic_id);
     }
 
     if (!h->long_ref_count)
@@ -105,7 +113,7 @@ static void fill_dpb(struct v4l2_ctrl_h264_decode_params *decode_params,
     for (int i = 0; i < FF_ARRAY_ELEMS(h->long_ref); i++) {
         const H264Picture *pic = h->long_ref[i];
         if (pic && (pic->field_poc[0] != INT_MAX || pic->field_poc[1] != INT_MAX))
-            fill_dpb_entry(&decode_params->dpb[entries++], pic, i);
+            fill_dpb_entry(&decode_params->dpb[entries++], h, pic, i);
     }
 }
 
