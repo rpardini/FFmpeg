@@ -137,7 +137,7 @@ static void fill_frame(struct v4l2_ctrl_av1_frame *ctrl, const AV1DecContext *s)
         V4L2_AV1_FRAME_RESTORE_WIENER,
         V4L2_AV1_FRAME_RESTORE_SGRPROJ,
     };
-    int i, j;
+    int i, j, sb_shift;
 
     *ctrl = (struct v4l2_ctrl_av1_frame) {
         .tile_info = {
@@ -231,14 +231,16 @@ static void fill_frame(struct v4l2_ctrl_av1_frame *ctrl, const AV1DecContext *s)
     if (frame_header->uniform_tile_spacing_flag)
         ctrl->tile_info.flags |= V4L2_AV1_TILE_INFO_FLAG_UNIFORM_TILE_SPACING;
 
+    /* mi_col_starts/mi_row_starts are in MI (4x4) units, the CBS starts in superblocks */
+    sb_shift = s->raw_seq->use_128x128_superblock ? 5 : 4;
     for (i = 0; i < frame_header->tile_cols; i++) {
-        ctrl->tile_info.mi_col_starts[i] = frame_header->tile_start_col_sb[i];
+        ctrl->tile_info.mi_col_starts[i] = frame_header->tile_start_col_sb[i] << sb_shift;
         ctrl->tile_info.width_in_sbs_minus_1[i] = frame_header->width_in_sbs_minus_1[i];
     }
     ctrl->tile_info.mi_col_starts[i] = 2 * ((cbctx->frame_width + 7) >> 3);
 
     for (i = 0; i < frame_header->tile_rows; i++) {
-        ctrl->tile_info.mi_row_starts[i] = frame_header->tile_start_row_sb[i];
+        ctrl->tile_info.mi_row_starts[i] = frame_header->tile_start_row_sb[i] << sb_shift;
         ctrl->tile_info.height_in_sbs_minus_1[i] = frame_header->height_in_sbs_minus_1[i];
     }
     ctrl->tile_info.mi_row_starts[i] = 2 * ((cbctx->frame_height + 7) >> 3);
