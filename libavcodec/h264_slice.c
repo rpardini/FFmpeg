@@ -1864,6 +1864,8 @@ static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
         if (ret < 0 && (h->avctx->err_recognition & AV_EF_EXPLODE))
             return AVERROR_INVALIDDATA;
         sl->ref_pic_marking_bit_size = pos - get_bits_left(&sl->gb);
+    } else {
+        sl->ref_pic_marking_bit_size = 0;
     }
 
     if (sl->slice_type_nos != AV_PICTURE_TYPE_I && pps->cabac) {
