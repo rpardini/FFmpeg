@@ -30,6 +30,14 @@
  * from the DRM fourcc *and* the format modifier of the incoming frame. That
  * cannot be known before the first frame arrives, so the mem2mem device is
  * probed on first use rather than while configuring the link.
+ *
+ * The converted frames are the device's own capture buffers, lent out until
+ * the consumer drops them; capture_buffers must cover what the consumer holds
+ * at once (a renderer queue plus the frame on screen), or the filter stalls
+ * for up to the timeout and then fails with ENOBUFS.
+ *
+ * For direct scanout on MT8195, whose planes take only linear packed YUV/RGB
+ * and cannot scale, ask for uyvy or yuyv at exactly the destination size.
  */
 
 #include <drm_fourcc.h>
@@ -55,6 +63,7 @@
 #include "libavutil/internal.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
+#include "libavutil/time.h"
 
 #include "avfilter.h"
 #include "filters.h"
@@ -142,6 +151,8 @@ struct V4L2Queue {
     int num_buffers;
     V4L2Buffer *buffers;
     ScaleV4L2M2MContextShared *ctx;
+    /* buffers currently owned by the driver; capture ones come back from other threads */
+    atomic_int queued;
 };
 
 struct ScaleV4L2M2MContextShared {
@@ -176,6 +187,8 @@ typedef struct ScaleV4L2M2MContext {
     int h;
     char *format_str;
     char *device;
+    int capture_buffers;
+    int timeout_ms;
 } ScaleV4L2M2MContext;
 
 static int scale_v4l2m2m_format_from_drm(uint32_t drm_format, uint64_t modifier)
@@ -383,6 +396,7 @@ static int scale_v4l2m2m_enqueue_buffer(V4L2Buffer *buf)
         return AVERROR(errno);
 
     buf->enqueued = 1;
+    atomic_fetch_add(&buf->q->queued, 1);
 
     return 0;
 }
@@ -558,7 +572,12 @@ static void scale_v4l2m2m_streamoff(V4L2Queue *queue)
     ioctl(queue->ctx->fd, VIDIOC_STREAMOFF, &type);
 }
 
-static V4L2Buffer *scale_v4l2m2m_dequeue_buffer(V4L2Queue *queue, int timeout)
+/*
+ * Returns NULL with *err set: AVERROR(EAGAIN) on timeout, AVERROR(EPIPE) when
+ * the device reports POLLERR (on a mem2mem device that also means no buffer is
+ * queued on this queue), or the DQBUF errno.
+ */
+static V4L2Buffer *scale_v4l2m2m_dequeue_buffer(V4L2Queue *queue, int timeout, int *err)
 {
     struct v4l2_plane planes[VIDEO_MAX_PLANES];
     ScaleV4L2M2MContextShared *ctx = queue->ctx;
@@ -576,18 +595,24 @@ static V4L2Buffer *scale_v4l2m2m_dequeue_buffer(V4L2Queue *queue, int timeout)
 
     for (;;) {
         int ret = poll(&pfd, 1, timeout);
-        if (ret > 0)
-            break;
         if (ret < 0 && errno == EINTR)
             continue;
-        return NULL;
+        if (ret < 0) {
+            *err = AVERROR(errno);
+            return NULL;
+        }
+        if (ret == 0) {
+            *err = AVERROR(EAGAIN);
+            return NULL;
+        }
+        if (pfd.revents & POLLERR) {
+            *err = AVERROR(EPIPE);
+            return NULL;
+        }
+        /* woken up for the other queue only, keep waiting for this one */
+        if (pfd.revents & events)
+            break;
     }
-
-    if (pfd.revents & POLLERR)
-        return NULL;
-
-    if (!(pfd.revents & events))
-        return NULL;
 
     buf.memory = V4L2_TYPE_IS_OUTPUT(queue->format.type) ?
                  V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP;
@@ -598,13 +623,16 @@ static V4L2Buffer *scale_v4l2m2m_dequeue_buffer(V4L2Queue *queue, int timeout)
         buf.m.planes = planes;
     }
 
-    if (ioctl(ctx->fd, VIDIOC_DQBUF, &buf) < 0)
+    if (ioctl(ctx->fd, VIDIOC_DQBUF, &buf) < 0) {
+        *err = AVERROR(errno);
         return NULL;
+    }
 
     {
         V4L2Buffer *avbuf = &queue->buffers[buf.index];
 
         avbuf->enqueued = 0;
+        atomic_fetch_sub(&queue->queued, 1);
         avbuf->buffer = buf;
         if (V4L2_TYPE_IS_MULTIPLANAR(queue->format.type)) {
             memcpy(avbuf->planes, planes, sizeof(planes));
@@ -628,9 +656,11 @@ static int scale_v4l2m2m_enqueue(V4L2Queue *queue, const AVFrame *frame)
 {
     AVDRMFrameDescriptor *drm_desc = (AVDRMFrameDescriptor *)frame->data[0];
     V4L2Buffer *buf;
+    int err;
 
     /* reap anything the device is done reading before looking for a slot */
-    while (scale_v4l2m2m_dequeue_buffer(queue, 0))
+    while (atomic_load(&queue->queued) > 0 &&
+           scale_v4l2m2m_dequeue_buffer(queue, 0, &err))
         ;
 
     buf = scale_v4l2m2m_find_free_buf(queue);
@@ -652,10 +682,14 @@ static int scale_v4l2m2m_enqueue(V4L2Queue *queue, const AVFrame *frame)
         buf->buffer.bytesused = buf->plane_info[0].length;
     }
 
-    buf->buffer.timestamp = (struct timeval) {
-        .tv_sec  = frame->pts / 1000000,
-        .tv_usec = frame->pts % 1000000,
-    };
+    /* only used to pair buffers up, the output frame takes its props from the input */
+    if (frame->pts != AV_NOPTS_VALUE && frame->pts >= 0)
+        buf->buffer.timestamp = (struct timeval) {
+            .tv_sec  = frame->pts / 1000000,
+            .tv_usec = frame->pts % 1000000,
+        };
+    else
+        buf->buffer.timestamp = (struct timeval) { 0 };
 
     return scale_v4l2m2m_enqueue_buffer(buf);
 }
@@ -710,11 +744,15 @@ static int scale_v4l2m2m_dequeue_frame(AVFilterContext *avctx, AVFrame *frame, i
     ScaleV4L2M2MContext *priv = avctx->priv;
     ScaleV4L2M2MContextShared *ctx = priv->shared;
     V4L2Buffer *avbuf;
+    int err = AVERROR(EINVAL);
 
-    avbuf = scale_v4l2m2m_dequeue_buffer(&ctx->capture, timeout);
+    avbuf = scale_v4l2m2m_dequeue_buffer(&ctx->capture, timeout, &err);
     if (!avbuf) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to dequeue a converted frame\n");
-        return AVERROR(EINVAL);
+        av_log(avctx, AV_LOG_ERROR, "Failed to dequeue a converted frame: %s\n",
+               err == AVERROR(EAGAIN) ? "timed out" :
+               err == AVERROR(EPIPE)  ? "device error or no capture buffer queued" :
+               av_err2str(err));
+        return err == AVERROR(EAGAIN) ? AVERROR(ETIMEDOUT) : err;
     }
 
     frame->buf[0] = av_buffer_create((uint8_t *)&avbuf->drm_frame,
@@ -853,6 +891,23 @@ static int scale_v4l2m2m_filter_frame(AVFilterLink *link, AVFrame *in)
             goto fail;
     }
 
+    /*
+     * Every converted frame is one of our capture buffers, handed on until the
+     * consumer drops it. A renderer such as Kodi keeps several frames queued
+     * and releases them from its own thread, so wait for one to come back
+     * rather than submitting a job that cannot complete.
+     */
+    for (int waited = 0; atomic_load(&ctx->capture.queued) <= 0; waited++) {
+        if (waited * 2 >= priv->timeout_ms) {
+            av_log(avctx, AV_LOG_ERROR,
+                   "All %d capture buffers are held downstream; "
+                   "raise capture_buffers\n", ctx->capture.num_buffers);
+            ret = AVERROR(ENOBUFS);
+            goto fail;
+        }
+        av_usleep(2000);
+    }
+
     ret = scale_v4l2m2m_enqueue(&ctx->output, in);
     if (ret) {
         av_log(avctx, AV_LOG_ERROR, "Failed to submit a frame for conversion\n");
@@ -865,7 +920,7 @@ static int scale_v4l2m2m_filter_frame(AVFilterLink *link, AVFrame *in)
         goto fail;
     }
 
-    ret = scale_v4l2m2m_dequeue_frame(avctx, out, 1000);
+    ret = scale_v4l2m2m_dequeue_frame(avctx, out, priv->timeout_ms);
     if (ret)
         goto fail;
 
@@ -950,8 +1005,10 @@ static av_cold int scale_v4l2m2m_init(AVFilterContext *avctx)
     ctx->in_fmt = -1;
     ctx->output.ctx = ctx;
     ctx->output.num_buffers = 6;
+    atomic_init(&ctx->output.queued, 0);
     ctx->capture.ctx = ctx;
-    ctx->capture.num_buffers = 6;
+    ctx->capture.num_buffers = priv->capture_buffers;
+    atomic_init(&ctx->capture.queued, 0);
     atomic_init(&ctx->refcount, 1);
 
     return 0;
@@ -981,6 +1038,10 @@ static const AVOption scale_v4l2m2m_options[] = {
       OFFSET(format_str), AV_OPT_TYPE_STRING, { .str = "nv12" }, 0, 0, FLAGS },
     { "device", "Mem2mem device to use, autodetected when unset",
       OFFSET(device), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
+    { "capture_buffers", "Converted frames in flight; must cover what the consumer holds",
+      OFFSET(capture_buffers), AV_OPT_TYPE_INT, { .i64 = 12 }, 2, 32, FLAGS },
+    { "timeout", "Milliseconds to wait for a conversion or a returned buffer",
+      OFFSET(timeout_ms), AV_OPT_TYPE_INT, { .i64 = 1000 }, 10, 60000, FLAGS },
     { NULL },
 };
 
