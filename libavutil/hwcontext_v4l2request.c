@@ -519,8 +519,11 @@ static int v4l2request_try_framesize(AVHWFramesContext *hwfc,
             return 0;
         } else if ((frmsize.type == V4L2_FRMSIZE_TYPE_STEPWISE ||
                     frmsize.type == V4L2_FRMSIZE_TYPE_CONTINUOUS) &&
-                   hwfc->width >= frmsize.stepwise.min_width &&
-                   hwfc->height >= frmsize.stepwise.min_height &&
+                   /*
+                    * Below the minimum, S_FMT rounds the buffers up and the
+                    * smaller frame still decodes into them; only the maximum
+                    * is a hard limit.
+                    */
                    hwfc->width <= frmsize.stepwise.max_width &&
                    hwfc->height <= frmsize.stepwise.max_height) {
             return 0;
