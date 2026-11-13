@@ -22,6 +22,7 @@
 
 #include "libavutil/attributes.h"
 #include "libavutil/hdr_dynamic_metadata.h"
+#include "libavutil/hwcontext.h"
 #include "libavutil/film_grain_params.h"
 #include "libavutil/mastering_display_metadata.h"
 #include "libavutil/mem.h"
@@ -666,6 +667,12 @@ static int get_pixel_format(AVCodecContext *avctx)
 
     for (int i = 0; pix_fmts[i] != pix_fmt; i++)
         if (pix_fmts[i] == avctx->pix_fmt) {
+            const AVHWFramesContext *frames = avctx->hw_frames_ctx ?
+                (const AVHWFramesContext *)avctx->hw_frames_ctx->data : NULL;
+            /* a new sequence may need larger frames than the current pool has */
+            if (frames && (frames->width  < avctx->coded_width ||
+                           frames->height < avctx->coded_height))
+                break;
             s->pix_fmt = pix_fmt;
             return 1;
         }
